@@ -1,14 +1,27 @@
-// API Key authentication middleware
+// api/middleware/auth.js
+
+// Simple API key authentication middleware
 function authenticateApiKey(req, res, next) {
-  const apiKey = req.headers['x-api-key'] || req.headers['authorization']?.replace('Bearer ', '');
-  
+  const headerApiKey = req.headers['x-api-key'];
+  const authHeader = req.headers['authorization'];
+
+  const bearerApiKey =
+    typeof authHeader === 'string' && authHeader.toLowerCase().startsWith('bearer ')
+      ? authHeader.slice(7).trim()
+      : null;
+
+  const apiKey = headerApiKey || bearerApiKey;
+
   if (!apiKey) {
     return res.status(401).json({ error: 'API key is required' });
   }
 
-  // Validate API key
   const validApiKey = process.env.GPT_API_KEY;
-  
+  if (!validApiKey) {
+    console.error('GPT_API_KEY is not set in environment variables');
+    return res.status(500).json({ error: 'Server configuration error' });
+  }
+
   if (apiKey !== validApiKey) {
     return res.status(401).json({ error: 'Invalid API key' });
   }
@@ -16,45 +29,51 @@ function authenticateApiKey(req, res, next) {
   next();
 }
 
-// Optional: Add rate limiting per API key
-const apiKeyRateLimits = new Map();
+// Optional: in-memory rate limiting per API key
+const limits = new Map();
 
-function rateLimitByApiKey(req, res, next) {
-  const apiKey = req.headers['x-api-key'];
-  
-  if (!apiKey) {
-    return next();
-  }
+/**
+ * Returns an Express middleware that rate-limits by API key.
+ */
+function rateLimitByApiKey({ windowMs = 15 * 60 * 1000, max = 100 } = {}) {
+  return (req, res, next) => {
+    const headerApiKey = req.headers['x-api-key'];
+    const authHeader = req.headers['authorization'];
 
-  const now = Date.now();
-  const windowMs = 60 * 1000; // 1 minute
-  const maxRequests = 30; // 30 requests per minute per API key
+    const bearerApiKey =
+      typeof authHeader === 'string' && authHeader.toLowerCase().startsWith('bearer ')
+        ? authHeader.slice(7).trim()
+        : null;
 
-  if (!apiKeyRateLimits.has(apiKey)) {
-    apiKeyRateLimits.set(apiKey, { count: 1, resetTime: now + windowMs });
-    return next();
-  }
+    const apiKey = headerApiKey || bearerApiKey;
 
-  const limit = apiKeyRateLimits.get(apiKey);
-  
-  if (now > limit.resetTime) {
-    limit.count = 1;
-    limit.resetTime = now + windowMs;
-  } else {
-    limit.count++;
-    
-    if (limit.count > maxRequests) {
-      return res.status(429).json({ 
-        error: 'Too many requests', 
-        retryAfter: Math.ceil((limit.resetTime - now) / 1000) 
+    if (!apiKey) {
+      // If no key, skip this limiter (auth middleware will handle it)
+      return next();
+    }
+
+    const now = Date.now();
+    let info = limits.get(apiKey);
+
+    if (!info || info.resetTime <= now) {
+      info = { count: 0, resetTime: now + windowMs };
+      limits.set(apiKey, info);
+    }
+
+    info.count += 1;
+
+    if (info.count > max) {
+      return res.status(429).json({
+        error: 'Too many requests',
+        retryAfter: Math.ceil((info.resetTime - now) / 1000),
       });
     }
-  }
 
-  next();
+    next();
+  };
 }
 
 module.exports = {
   authenticateApiKey,
-  rateLimitByApiKey
+  rateLimitByApiKey,
 };
